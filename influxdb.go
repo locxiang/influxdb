@@ -1,15 +1,14 @@
 package influxdb
 
 import (
+	"errors"
+	"fmt"
 	"github.com/influxdata/influxdb/client/v2"
-	"github.com/lexkong/log"
-	"math/rand"
 	"time"
 )
 
 //TIMER 发送频率，如果规定时间还没达到Max数量就发送
 const TIMER = 1000 * time.Millisecond
-
 
 type Inbound struct {
 	Self       client.Client
@@ -21,37 +20,42 @@ type Inbound struct {
 	close      chan struct{}
 	closeOK    chan struct{} //用来确认关闭完成
 	chanPoints chan *client.Point
+	errorFun   func(err error)
+	debug      bool
 }
 
-func (inbound *Inbound) Run() {
-	log.Infof("启动inbound连接：%s", inbound.dbName)
-	defer log.Debugf("结束inbound循环：%s", inbound.dbName)
+func (inbound *Inbound) Log(format string, args ...interface{}) {
+	if inbound.debug {
+		fmt.Printf(format+"\r\n", args...)
+	}
+}
 
+func (inbound *Inbound) run() {
 	for {
 		select {
 		case <-inbound.close:
-			log.Debugf("influxdb[%s]关闭前最后一次发送数据", inbound.dbName)
+			inbound.Log("influxdb[%s]关闭前最后一次发送数据", inbound.dbName)
 			inbound.lastSendDB()
-			log.Infof("关闭influxdb:%s", inbound.dbName)
+			inbound.Log("关闭influxdb:%s", inbound.dbName)
 			inbound.closeOK <- struct{}{}
 			return
 		case <-inbound.t.C:
 			if len(inbound.points) > 0 {
-				log.Debugf("计时器执行 %d", len(inbound.points))
-				inbound.sendDb()
+				inbound.Log("计时器执行 添加%d条", len(inbound.points))
+				err := inbound.sendDb()
+				if err != nil {
+					inbound.errorFun(err)
+				}
 			} else {
 				inbound.t.Reset(TIMER)
 			}
-		case msg, ok := <-inbound.chanPoints:
-			if !ok {
-				log.Errorf(nil, "[%s] chanPoints通道被意外关闭", inbound.dbName)
-				return
-			}
-
+		case msg := <-inbound.chanPoints:
 			inbound.points = append(inbound.points, msg)
 			if len(inbound.points) >= int(inbound.pushMax) {
-				log.Debugf("超过 [%d] 条执行插入数据库操作", len(inbound.points))
-				inbound.sendDb()
+				err := inbound.sendDb()
+				if err != nil {
+					inbound.errorFun(err)
+				}
 			}
 		}
 	}
@@ -71,19 +75,19 @@ func (inbound *Inbound) lastSendDB() {
 
 	ballpoints, err := inbound.newBatchPoints()
 	if err != nil {
-		log.Errorf(err, "new batch chanPoints error")
+		inbound.errorFun(err)
 		return
 	}
 
 	if len(inbound.points) == 0 {
-		log.Debugf("消息池内容为空不发送")
+		inbound.Log("消息池内容为空不发送")
 		return
 	}
 
 	ballpoints.AddPoints(inbound.points)
 	err = inbound.Self.Write(ballpoints)
 	if err != nil {
-		log.Errorf(err, "inbound[%s] Write error", inbound.dbName)
+		inbound.errorFun(err)
 	}
 	return
 }
@@ -95,7 +99,6 @@ func (inbound *Inbound) sendDb() error {
 
 	ballpoints, err := inbound.newBatchPoints()
 	if err != nil {
-		log.Errorf(err, "new batch chanPoints error")
 		return err
 	}
 
@@ -107,19 +110,39 @@ func (inbound *Inbound) sendDb() error {
 		ballpoints.AddPoints(c)
 		err = inbound.Self.Write(ballpoints)
 		if err != nil {
-			time.Sleep(time.Duration(rand.Intn(3000)) * time.Millisecond)
-			if e := inbound.Self.Write(ballpoints); e != nil {
-				log.Errorf(e, "write db error")
-			}
+			inbound.errorFun(err)
 		}
 	}()
 
 	return nil
 }
 
-func (inbound *Inbound) Stop() {
+func (inbound *Inbound) stop() {
 	go func() {
 		inbound.close <- struct{}{}
 	}()
 	<-inbound.closeOK
+	inbound.Self.Close()
+}
+
+//判断db是否存在
+func (inbound *Inbound) existsDB() error {
+
+	q := client.NewQuery("SHOW DATABASES", "", "")
+	if response, err := inbound.Self.Query(q); err != nil {
+		return err
+	} else {
+		if response.Error() != nil {
+			return response.Error()
+		}
+
+		databases := response.Results[0].Series[0].Values
+		for _, d := range databases {
+			dbName, _ := d[0].(string)
+			if dbName == inbound.dbName {
+				return nil
+			}
+		}
+		return errors.New("数据库不存在：" + inbound.dbName)
+	}
 }

@@ -11,12 +11,21 @@ import (
 var defaultDB string
 
 //多数据库模式
-var db map[string]*Inbound
+var db = make(map[string]*Inbound)
 
-func init() {
-	db = make(map[string]*Inbound)
+// Config 配置文件
+type Config struct {
+	Addr,
+	Username,
+	Password,
+	DBName,
+	Precision string
+	PushMax int
+	Error   func(err error)
+	Debug   bool
 }
 
+// SetDefaultDB 设置默认数据库
 func SetDefaultDB(dbName string) error {
 	var ok bool
 	_, ok = db[dbName]
@@ -28,41 +37,55 @@ func SetDefaultDB(dbName string) error {
 	return nil
 }
 
-//启动数据连接服务
-func Init(addr, username, password, dbName, precision string, pushMax uint) {
+//Init 启动数据连接服务  返回一个退出状态
+func Init(c Config) error {
+	self := openDB(c.Addr, c.Username, c.Password)
 
-	db[dbName] = &Inbound{
-		Self:       openDB(addr, username, password),
-		points:     make([]*client.Point, 0, pushMax),
+	db[c.DBName] = &Inbound{
+		Self:       self,
+		points:     make([]*client.Point, 0, c.PushMax),
 		t:          time.NewTimer(TIMER),
-		dbName:     dbName,
-		precision:  precision,
-		pushMax:    int(pushMax),
+		dbName:     c.DBName,
+		precision:  c.Precision,
+		pushMax:    int(c.PushMax),
 		close:      make(chan struct{}),
 		closeOK:    make(chan struct{}),
 		chanPoints: make(chan *client.Point),
+		errorFun:   c.Error,
+		debug:      c.Debug,
 	}
 
-	go db[dbName].Run()
+	err := db[c.DBName].existsDB()
+	if err != nil {
+		return err
+	}
+
+	go db[c.DBName].run()
+
+	return nil
 
 }
 
-//关闭数据连接服务,dbNames为空关闭所有
-func Stop(dbNames ...string) {
+//Stop 关闭数据连接服务,dbNames为空关闭所有
+func Stop(dbNames ...string) error {
 	if len(dbNames) == 0 {
-		for _, inc := range db {
-			inc.Stop()
+		for dbName, inc := range db {
+			inc.stop()
+			delete(db, dbName)
 		}
 	} else {
 		for _, dbName := range dbNames {
 			inc, ok := db[dbName]
 			if ok {
-				inc.Stop()
+				inc.stop()
+				delete(db, dbName)
 			} else {
-				log.Errorf(nil, "不存在数据库：%s", dbName)
+				return fmt.Errorf("不存在数据库：%s", dbName)
 			}
 		}
 	}
+
+	return nil
 }
 
 //init db
