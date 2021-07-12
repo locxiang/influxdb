@@ -1,9 +1,9 @@
 package influxdb_test
 
 import (
+	"github.com/locxiang/influxdb"
 	"testing"
 	"time"
-	"zkjl/data-hamal/influxdb"
 )
 
 func init() {
@@ -12,7 +12,7 @@ func init() {
 }
 
 func TestNewPointJob(t *testing.T) {
-	influxdb.WriteJob("test", "微信附近人", "alksdjflkasdjf", "completed", 30,time.Now())
+	influxdb.WriteJob("test", "微信附近人", "alksdjflkasdjf", "completed", 30, time.Now())
 
 	time.Sleep(5 * time.Second)
 }
